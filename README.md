@@ -163,4 +163,4 @@ MIT — fais-en ce que tu veux.
 
 ## Auteur
 
-Créé par [@Rafboul](https://twitter.com/Rafboul) — étudiant ingénieur LLM (Built with Claude)
+Créé par [@Rafboul](https://twitter.com/Rafboul) — étudiant ingénieur LLM
