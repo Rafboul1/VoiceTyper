@@ -1,0 +1,16 @@
+# Environnement Python
+venv/
+__pycache__/
+*.pyc
+
+# Fichier vocabulaire perso (chacun a le sien)
+vocabulaire.json
+
+# Cache Whisper
+*.bin
+*.pt
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
