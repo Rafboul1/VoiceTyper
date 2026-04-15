@@ -17,6 +17,7 @@ import time
 import ctypes
 import ctypes.wintypes
 import json
+import logging
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
@@ -27,6 +28,22 @@ from PIL import Image, ImageDraw
 import pyperclip
 
 
+# ── Logging vers fichier (pour mode silencieux) ───────────────
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice_typer.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),  # Garde aussi la console si elle existe
+    ],
+)
+log = logging.info
+log_err = logging.error
+
+
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  CONFIGURATION — Modifie ici selon tes préférences          ║
 # ╚══════════════════════════════════════════════════════════════╝
@@ -34,7 +51,7 @@ import pyperclip
 # --- Whisper (modèle de transcription) ---
 WHISPER_MODEL = "large-v3"       # "medium" = plus rapide, "large-v3" = meilleure qualité
 WHISPER_DEVICE = "cuda"          # "cuda" pour GPU (recommandé), "cpu" sinon
-COMPUTE_TYPE = "float16"         # "float16" pour GPU, "int8" pour CPU
+COMPUTE_TYPE = "float16"         # "float16" = GPU précis, "int8_float16" = GPU rapide, "int8" = CPU
 
 # --- Audio ---
 SAMPLE_RATE = 16000              # Ne pas changer (Whisper attend 16kHz)
@@ -81,7 +98,7 @@ VOCAB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vocabulai
 # que tu utilises souvent. Whisper essaiera de les reconnaître.
 HINT_WORDS = [
     # Exemples (remplace par tes propres mots) :
-    # "Rafboul", "FastAPI",
+    # "Rafboul", "A.E.I.", "FastAPI",
 ]
 
 # Dictionnaire de remplacement APRÈS transcription.
@@ -91,6 +108,7 @@ HINT_WORDS = [
 DEFAULT_REPLACEMENTS = {
     # Exemples (remplace par les tiens) :
     # "rafboul": "Rafboul",
+    # "aei": "A.E.I.",
 }
 
 
@@ -155,9 +173,9 @@ class VocabManager:
                     if word not in self.hint_words:
                         self.hint_words.append(word)
                 self.replacements.update(file_replacements)
-                print(f"  ✓ Vocabulaire chargé : {len(self.hint_words)} mots, {len(self.replacements)} remplacements")
+                log(f"✓ Vocabulaire chargé : {len(self.hint_words)} mots, {len(self.replacements)} remplacements")
             except Exception as e:
-                print(f"  ⚠ Erreur lecture vocabulaire : {e}")
+                log(f"⚠ Erreur lecture vocabulaire : {e}")
         else:
             self._save_default()
 
@@ -173,6 +191,7 @@ class VocabManager:
                 "# Ajoute tes mots ici, un par ligne",
                 "# Exemples :",
                 "# Rafboul",
+                "# A.E.I.",
             ],
             "replacements": self.replacements if self.replacements else {
                 "# exemple_whisper_dit": "# ce_que_tu_veux",
@@ -181,10 +200,10 @@ class VocabManager:
         try:
             with open(self.vocab_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            print(f"  ✓ Fichier vocabulaire créé : {self.vocab_file}")
-            print("    Édite-le pour ajouter tes mots persos !")
+            log(f"✓ Fichier vocabulaire créé : {self.vocab_file}")
+            log("    Édite-le pour ajouter tes mots persos !")
         except Exception as e:
-            print(f"  ⚠ Impossible de créer {self.vocab_file} : {e}")
+            log(f"⚠ Impossible de créer {self.vocab_file} : {e}")
 
     def get_initial_prompt(self) -> str:
         """Construit le prompt initial pour Whisper avec les mots à reconnaître."""
@@ -218,7 +237,7 @@ def auto_detect_microphone():
     Retourne le device_id et le nombre de canaux du premier micro qui fonctionne.
     Priorité : micros Realtek / intégrés > autres.
     """
-    print("  🔍 Auto-détection du micro...")
+    log("  🔍 Auto-détection du micro...")
     devs = sd.query_devices()
 
     # Collecter tous les devices d'entrée
@@ -228,7 +247,7 @@ def auto_detect_microphone():
             input_devices.append((i, d))
 
     if not input_devices:
-        print("  ✗ Aucun micro détecté !")
+        log("  ✗ Aucun micro détecté !")
         return None, 1
 
     # Trier : prioriser les micros Realtek / réseau de microphones (micro intégré)
@@ -268,14 +287,14 @@ def auto_detect_microphone():
             sd.wait()
 
             # Vérifier que le stream s'est ouvert sans erreur
-            print(f"    [{dev_id}] {name} → OK ✓")
+            log(f"  [{dev_id}] {name} → OK ✓")
             return dev_id, channels
 
         except Exception as e:
-            print(f"    [{dev_id}] {name} → échec ({e})")
+            log(f"  [{dev_id}] {name} → échec ({e})")
             continue
 
-    print("  ✗ Aucun micro fonctionnel trouvé !")
+    log("  ✗ Aucun micro fonctionnel trouvé !")
     return None, 1
 
 
@@ -355,9 +374,9 @@ class VoiceTyper:
             if detected_id is not None:
                 AUDIO_DEVICE = detected_id
                 self._record_channels = detected_channels
-                print(f"  ✓ Micro sélectionné : device {AUDIO_DEVICE}")
+                log(f"✓ Micro sélectionné : device {AUDIO_DEVICE}")
             else:
-                print("  ⚠ Auto-détection échouée, utilisation du micro par défaut")
+                log("  ⚠ Auto-détection échouée, utilisation du micro par défaut")
                 AUDIO_DEVICE = None
         else:
             # Device manuel : récupérer le nombre de canaux
@@ -366,7 +385,7 @@ class VoiceTyper:
                 self._record_channels = max(1, min(int(info["max_input_channels"]), 2))
             except Exception:
                 self._record_channels = 1
-        print()
+        log("")
 
         # Vocabulaire custom
         self.vocab = VocabManager(VOCAB_FILE)
@@ -405,20 +424,20 @@ class VoiceTyper:
 
     def _load_model(self):
         """Charge le modèle Whisper (peut prendre du temps au 1er lancement)."""
-        print("=" * 50)
-        print("  VoiceTyper — Chargement du modèle Whisper")
-        print(f"  Modèle : {WHISPER_MODEL} | Device : {WHISPER_DEVICE}")
-        print("=" * 50)
-        print()
+        log("=" * 50)
+        log("  VoiceTyper — Chargement du modèle Whisper")
+        log(f"  Modèle : {WHISPER_MODEL} | Device : {WHISPER_DEVICE}")
+        log("=" * 50)
+        log("")
 
         if WHISPER_DEVICE == "cuda":
-            print("  Utilisation du GPU (CUDA)")
+            log("  Utilisation du GPU (CUDA)")
         else:
-            print("  Utilisation du CPU (plus lent)")
+            log("  Utilisation du CPU (plus lent)")
 
-        print(f"  Téléchargement/chargement de '{WHISPER_MODEL}'...")
-        print("  (Le 1er lancement télécharge le modèle ~3 Go)")
-        print()
+        log(f"  Téléchargement/chargement de '{WHISPER_MODEL}'...")
+        log("  (Le 1er lancement télécharge le modèle ~3 Go)")
+        log("")
 
         try:
             self.model = WhisperModel(
@@ -426,38 +445,38 @@ class VoiceTyper:
                 device=WHISPER_DEVICE,
                 compute_type=COMPUTE_TYPE,
             )
-            print("  ✓ Modèle chargé avec succès ")
-            print()
+            log("  ✓ Modèle chargé avec succès ")
+            log("")
             self._set_idle()
             self._print_ready()
         except Exception as e:
-            print(f"\n  ✗ Erreur au chargement du modèle : {e}")
-            print("  Vérifie que CUDA est bien installé (nvidia-smi)")
-            print("  Ou change WHISPER_DEVICE = 'cpu' dans la config")
+            log(f"\n  ✗ Erreur au chargement du modèle : {e}")
+            log("  Vérifie que CUDA est bien installé (nvidia-smi)")
+            log("  Ou change WHISPER_DEVICE = 'cpu' dans la config")
             self.tray.title = "VoiceTyper — ERREUR"
             return
 
     def _print_ready(self):
         """Affiche les infos de fonctionnement."""
-        print("  ┌──────────────────────────────────────────┐")
-        print("  │          VoiceTyper v1.1 prêt            │")
-        print("  ├──────────────────────────────────────────┤")
+        log("  ┌──────────────────────────────────────────┐")
+        log("  │          VoiceTyper v1.1 prêt            │")
+        log("  ├──────────────────────────────────────────┤")
         if PTT_MODE == "mouse":
             btn_name = "avant (x2)" if MOUSE_BUTTON == "x2" else "arrière (x1)"
-            print(f"  │  Bouton souris {btn_name} = push-to-talk │")
+            log(f"  │  Bouton souris {btn_name} = push-to-talk │")
         else:
-            print(f"  │  Ctrl droit = push-to-talk              │")
-        print("  │                                          │")
-        print("  │  Parle → texte tapé au curseur           │")
-        print("  │  Texte sélectionné → remplacé            │")
-        print("  │                                          │")
-        print("  │             Icône tray  :                │")
-        print("  │    Gris = veille | Rouge = écoute        │")
-        print("  │    Bleu = transcription                  │")
-        print("  │                                          │")
-        print("  │  Vocabulaire : édite vocabulaire.json    │")
-        print("  └──────────────────────────────────────────┘")
-        print()
+            log("  │  Ctrl droit = push-to-talk              │")
+        log("  │                                          │")
+        log("  │  Parle → texte tapé au curseur           │")
+        log("  │  Texte sélectionné → remplacé            │")
+        log("  │                                          │")
+        log("  │             Icône tray  :                │")
+        log("  │    Gris = veille | Rouge = écoute        │")
+        log("  │    Bleu = transcription                  │")
+        log("  │                                          │")
+        log("  │  Vocabulaire : édite vocabulaire.json    │")
+        log("  └──────────────────────────────────────────┘")
+        log("")
 
     # ── Capture de la sélection ──────────────────────────────
 
@@ -483,7 +502,7 @@ class VoiceTyper:
 
             if current and current != old_clipboard:
                 self.selected_text_on_start = current
-                print(f"  → Texte sélectionné détecté ({len(current)} car.) → sera remplacé")
+                log(f"→ Texte sélectionné détecté ({len(current)} car.) → sera remplacé")
             else:
                 self.selected_text_on_start = None
 
@@ -495,13 +514,29 @@ class VoiceTyper:
 
     # ── Enregistrement audio ─────────────────────────────────
 
+    def _open_stream(self):
+        """Ouvre le stream audio une seule fois au démarrage et le garde ouvert."""
+        try:
+            self.stream = sd.InputStream(
+                device=AUDIO_DEVICE,
+                samplerate=SAMPLE_RATE,
+                channels=self._record_channels,
+                dtype="float32",
+                blocksize=1024,
+                callback=self._audio_callback,
+            )
+            self.stream.start()
+            log("✓ Stream audio ouvert en permanence")
+        except Exception as e:
+            log_err(f"✗ Erreur ouverture stream audio : {e}")
+
     def _audio_callback(self, indata, frames, time_info, status):
-        """Callback appelé par sounddevice pour chaque chunk audio."""
+        """Callback appelé par sounddevice — collecte uniquement si enregistrement actif."""
         if self.is_recording:
             self.audio_chunks.append(indata.copy())
 
     def start_recording(self):
-        """Démarre l'enregistrement audio."""
+        """Démarre la collecte audio (le stream reste ouvert)."""
         if self.is_recording or self.is_processing or self.model is None:
             return
 
@@ -516,37 +551,12 @@ class VoiceTyper:
         self.tray.title = "VoiceTyper — Enregistrement..."
         play_beep(SOUND_START_FREQ, SOUND_DURATION_MS)
 
-        # Démarrer le flux audio
-        try:
-            self.stream = sd.InputStream(
-                device=AUDIO_DEVICE,
-                samplerate=SAMPLE_RATE,
-                channels=self._record_channels,
-                dtype="float32",
-                blocksize=1024,
-                callback=self._audio_callback,
-            )
-            self.stream.start()
-        except Exception as e:
-            print(f"  ✗ Erreur micro : {e}")
-            self.is_recording = False
-            self._set_idle()
-
     def stop_recording(self):
-        """Arrête l'enregistrement et lance la transcription."""
+        """Arrête la collecte audio et lance la transcription (stream reste ouvert)."""
         if not self.is_recording:
             return
 
         self.is_recording = False
-
-        # Arrêter le flux audio
-        if self.stream:
-            try:
-                self.stream.stop()
-                self.stream.close()
-            except Exception:
-                pass
-            self.stream = None
 
         play_beep(SOUND_STOP_FREQ, SOUND_DURATION_MS)
 
@@ -574,7 +584,7 @@ class VoiceTyper:
             duration = len(audio) / SAMPLE_RATE
 
             if duration < MIN_DURATION:
-                print(f"  → Audio trop court ({duration:.1f}s < {MIN_DURATION}s), ignoré")
+                log(f"→ Audio trop court ({duration:.1f}s < {MIN_DURATION}s), ignoré")
                 return
 
             # Amplifier le signal si voix basse
@@ -582,7 +592,7 @@ class VoiceTyper:
                 audio = audio * AUDIO_GAIN
                 audio = np.clip(audio, -1.0, 1.0)
 
-            print(f"  → Transcription de {duration:.1f}s d'audio...", end=" ", flush=True)
+            log(f"→ Transcription de {duration:.1f}s d'audio...")
             start_time = time.time()
 
             # Construire le prompt initial avec le vocabulaire custom
@@ -621,14 +631,14 @@ class VoiceTyper:
 
             if text:
                 mode = "REMPLACE" if self.selected_text_on_start else "INSERT"
-                print(f"OK ({elapsed:.1f}s, {lang} {prob}) [{mode}]")
-                print(f"  → \"{text}\"")
+                log(f"OK ({elapsed:.1f}s, {lang} {prob}) [{mode}]")
+                log("→ \"{text}\"")
                 self._type_text(text)
             else:
-                print(f"(aucun texte détecté, {elapsed:.1f}s)")
+                log(f"(aucun texte détecté, {elapsed:.1f}s)")
 
         except Exception as e:
-            print(f"\n  ✗ Erreur transcription : {e}")
+            log_err(f"✗ Erreur transcription : {e}")
         finally:
             self.is_processing = False
             self.selected_text_on_start = None
@@ -670,13 +680,16 @@ class VoiceTyper:
             pyperclip.copy(text)
             time.sleep(PASTE_DELAY)
 
-            # Coller via Windows API (plus fiable que pynput)
-            win_ctrl_v()
+            # Coller via pynput (moins d'interférence audio que keybd_event)
+            self.kb.press(Key.ctrl_l)
+            self.kb.press('v')
+            self.kb.release('v')
+            self.kb.release(Key.ctrl_l)
 
             time.sleep(PASTE_DELAY)
 
         except Exception as e:
-            print(f"  ✗ Erreur de frappe : {e}")
+            log_err(f"✗ Erreur de frappe : {e}")
         finally:
             # Restaurer le presse-papiers après un court délai
             def restore():
@@ -717,7 +730,7 @@ class VoiceTyper:
 
     def _quit(self, icon, item):
         """Quitte l'application proprement."""
-        print("\n  VoiceTyper arrêté")
+        log("\n  VoiceTyper arrêté")
         if self.stream:
             try:
                 self.stream.stop()
@@ -731,6 +744,9 @@ class VoiceTyper:
 
     def run(self):
         """Lance l'application."""
+        # Ouvrir le stream audio une seule fois (évite les clics à chaque push-to-talk)
+        self._open_stream()
+
         # Charger le modèle dans un thread pour ne pas bloquer le tray
         threading.Thread(target=self._load_model, daemon=True).start()
 
@@ -738,18 +754,18 @@ class VoiceTyper:
         if PTT_MODE == "mouse":
             listener = mouse.Listener(on_click=self._on_mouse_click)
             listener.start()
-            print("  → Listener souris démarré")
+            log("  → Listener souris démarré")
         else:
             listener = keyboard.Listener(
                 on_press=self._on_key_press,
                 on_release=self._on_key_release,
             )
             listener.start()
-            print("  → Listener clavier démarré")
+            log("  → Listener clavier démarré")
 
         # Lancer le tray (bloquant)
-        print("  → Lancement du system tray...")
-        print()
+        log("  → Lancement du system tray...")
+        log("")
         self.tray.run()
 
 
@@ -757,14 +773,14 @@ class VoiceTyper:
 
 if __name__ == "__main__":
     if sys.platform != "win32":
-        print("VoiceTyper est conçu pour Windows uniquement.")
+        log("VoiceTyper est conçu pour Windows uniquement.")
         sys.exit(1)
 
-    print()
-    print("  ╔═══════════════════════════════════════╗")
-    print("  ║        VoiceTyper v1.1                ║")
-    print("  ╚═══════════════════════════════════════╝")
-    print()
+    log("")
+    log("  ╔═══════════════════════════════════════╗")
+    log("  ║        VoiceTyper v1.1                ║")
+    log("  ╚═══════════════════════════════════════╝")
+    log("")
 
     app = VoiceTyper()
     app.run()

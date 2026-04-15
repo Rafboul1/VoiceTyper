@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0"
 echo ============================================
 echo   VoiceTyper - Installation
 echo ============================================
@@ -28,14 +29,14 @@ call venv\Scripts\activate.bat
 echo [3/3] Installation des dependances...
 echo      (ca peut prendre quelques minutes)
 echo.
-pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 
 echo.
 echo ============================================
 echo   Installation terminee !
 echo.
-echo   IMPORTANT - GPU NVIDIA :
+echo   IMPORTANT - CUDA (GPU) :
 echo   Si tu as une carte NVIDIA, installe aussi
 echo   CUDA Toolkit 12.x depuis :
 echo   https://developer.nvidia.com/cuda-downloads
