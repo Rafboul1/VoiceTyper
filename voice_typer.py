@@ -1,5 +1,5 @@
 """
-VoiceTyper v1.1 - Dictée vocale locale push-to-talk pour Windows
+VoiceTyper v1.3 - Dictée vocale locale push-to-talk pour Windows
 =================================================================
 Utilise faster-whisper sur GPU pour transcrire ta voix en texte
 partout sur ton PC (system-wide).
@@ -12,6 +12,8 @@ Auteur: @Rafboul
 
 import sys
 import os
+import re
+import queue
 import threading
 import time
 import ctypes
@@ -22,7 +24,7 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from pynput import mouse, keyboard
-from pynput.keyboard import Key, Controller as KBController
+from pynput.keyboard import Key
 import pystray
 from PIL import Image, ImageDraw
 import pyperclip
@@ -65,11 +67,16 @@ AUDIO_DEVICE = "auto"
 PTT_MODE = "mouse"
 
 # Boutons souris : "x1" = bouton arrière (pouce), "x2" = bouton avant (pouce)
+# ✅ Les boutons x1/x2 sont interceptés ET supprimés via un hook Windows natif,
+#    donc le terminal ne voit pas le clic — plus de conflit avec Windows Terminal.
 MOUSE_BUTTON = "x2"
 
 # Touche clavier (si PTT_MODE = "keyboard") : utilise le nom pynput
-# Exemples : Key.scroll_lock, Key.pause, Key.f24, Key.ctrl_r
-KEYBOARD_KEY = Key.ctrl_r
+# ✅ Key.pause      → touche Pause/Break  (safe partout, y compris dans les terminaux)
+# ✅ Key.scroll_lock → touche Scroll Lock (idem)
+# ✅ Key.ctrl_r     → Ctrl droit          (safe dans la plupart des apps)
+# ⚠️ Key.shift_l   → Shift gauche        (peut interférer avec la sélection de texte)
+KEYBOARD_KEY = Key.pause
 
 # --- Sons de feedback ---
 SOUND_ENABLED = False            # True = bip sonore quand on commence/arrête
@@ -80,9 +87,36 @@ SOUND_DURATION_MS = 80           # Durée du bip (ms)
 # --- Sensibilité micro ---
 AUDIO_GAIN = 3.0                 # Amplification du volume (1.0 = normal, 2-4 = voix basse)
 
+# --- VAD (Voice Activity Detection) ---
+# Seuil de détection de la voix. Plus haut = moins sensible aux bruits parasites.
+# 0.3 = très sensible (risque d'hallucinations sur bruits), 0.5 = recommandé, 0.7 = strict
+VAD_THRESHOLD = 0.5
+
 # --- Divers ---
 PASTE_DELAY = 0.05               # Délai avant de coller le texte (secondes)
 ADD_TRAILING_SPACE = True        # Ajouter un espace après le texte transcrit
+
+# --- Exclusion de terminaux ---
+# Si TERMINAL_DETECTION = True, le PTT est ignoré quand un terminal est au premier plan.
+# ⚠️  Si tu veux DICTER dans le terminal → mets False.
+# ✅  Si tu veux juste éviter les conflits accidentels en terminal → mets True.
+TERMINAL_DETECTION = False
+
+# Liste des noms de processus à exclure (en minuscules, avec .exe).
+# Ajoute d'autres processus si besoin.
+TERMINAL_BLACKLIST = {
+    "windowsterminal.exe",  # Windows Terminal (Claude Code, PowerShell, WSL...)
+    "cmd.exe",              # Invite de commandes Windows
+    "powershell.exe",       # PowerShell classique
+    "pwsh.exe",             # PowerShell 7+
+    "bash.exe",             # WSL / Git Bash
+    "wsl.exe",              # Windows Subsystem for Linux
+    "wslhost.exe",
+    "mintty.exe",           # Git Bash (mintty)
+    "alacritty.exe",        # Terminal Alacritty
+    "hyper.exe",            # Terminal Hyper
+    "conhost.exe",          # Console Host Windows
+}
 
 # --- Vocabulaire custom ---
 # Fichier JSON avec tes mots personnalisés (créé automatiquement au 1er lancement)
@@ -121,6 +155,7 @@ DEFAULT_REPLACEMENTS = {
 user32 = ctypes.windll.user32
 
 VK_CONTROL = 0x11
+VK_SHIFT   = 0x10
 VK_V = 0x56
 VK_A = 0x41
 VK_C = 0x43
@@ -148,6 +183,163 @@ def win_ctrl_v():
     win_key_combo(VK_CONTROL, VK_V)
 
 
+def win_ctrl_shift_v():
+    """Ctrl+Shift+V via Windows API (collage dans les terminaux)."""
+    user32.keybd_event(VK_CONTROL, 0, 0, 0)
+    time.sleep(0.01)
+    user32.keybd_event(VK_SHIFT, 0, 0, 0)
+    time.sleep(0.01)
+    user32.keybd_event(VK_V, 0, 0, 0)
+    time.sleep(0.01)
+    user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
+    time.sleep(0.01)
+    user32.keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0)
+    time.sleep(0.01)
+    user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+
+
+# ── Hook souris bas niveau (supprime x1/x2 avant les autres applis) ──────────
+
+WH_MOUSE_LL    = 14
+WM_XBUTTONDOWN = 0x020B
+WM_XBUTTONUP   = 0x020C
+XBUTTON1       = 0x0001
+XBUTTON2       = 0x0002
+
+class _MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt",          ctypes.wintypes.POINT),
+        ("mouseData",   ctypes.wintypes.DWORD),
+        ("flags",       ctypes.wintypes.DWORD),
+        ("time",        ctypes.wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+_LowLevelMouseProc = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM
+)
+
+# Déclaration explicite des argtypes/restype pour les fonctions Windows utilisées
+user32.SetWindowsHookExW.argtypes = [
+    ctypes.c_int,
+    _LowLevelMouseProc,
+    ctypes.wintypes.HINSTANCE,
+    ctypes.wintypes.DWORD,
+]
+user32.SetWindowsHookExW.restype = ctypes.wintypes.HHOOK
+
+user32.CallNextHookEx.argtypes = [
+    ctypes.wintypes.HHOOK,
+    ctypes.c_int,
+    ctypes.wintypes.WPARAM,
+    ctypes.wintypes.LPARAM,
+]
+user32.CallNextHookEx.restype = ctypes.c_long
+
+user32.UnhookWindowsHookEx.argtypes = [ctypes.wintypes.HHOOK]
+user32.UnhookWindowsHookEx.restype  = ctypes.wintypes.BOOL
+
+user32.GetMessageW.argtypes = [
+    ctypes.POINTER(ctypes.wintypes.MSG),
+    ctypes.wintypes.HWND,
+    ctypes.c_uint,
+    ctypes.c_uint,
+]
+user32.GetMessageW.restype = ctypes.wintypes.BOOL
+
+
+class MouseHook:
+    """Hook souris Windows natif — intercepte ET supprime les boutons x1/x2.
+
+    Contrairement à pynput (qui laisse l'événement passer), ce hook retourne 1
+    pour annuler la propagation : le terminal ne reçoit jamais le clic.
+    """
+
+    def __init__(self, button_name: str, on_press, on_release):
+        self._target = XBUTTON2 if button_name == "x2" else XBUTTON1
+        self._on_press = on_press
+        self._on_release = on_release
+        self._hook_handle = None
+        self._proc = None       # Référence pour éviter le garbage-collect
+        self._thread_id = None
+
+    def start(self):
+        """Lance le hook dans un thread dédié (requis par Windows)."""
+        t = threading.Thread(target=self._run, daemon=True)
+        t.start()
+
+    def _run(self):
+        """Installe le hook et tourne la boucle de messages."""
+        self._thread_id = _kernel32.GetCurrentThreadId()
+
+        def _proc(nCode, wParam, lParam):
+            if nCode >= 0 and wParam in (WM_XBUTTONDOWN, WM_XBUTTONUP):
+                ms = ctypes.cast(lParam, ctypes.POINTER(_MSLLHOOKSTRUCT)).contents
+                btn = (ms.mouseData >> 16) & 0xFFFF
+                if btn == self._target:
+                    cb = self._on_press if wParam == WM_XBUTTONDOWN else self._on_release
+                    cb()  # Appel synchrone direct — start/stop_recording ne font que changer des booléens
+                    return 1  # ← Supprime l'événement (terminal ne le voit pas)
+            return user32.CallNextHookEx(self._hook_handle, nCode, wParam, lParam)
+
+        self._proc = _LowLevelMouseProc(_proc)
+        self._hook_handle = user32.SetWindowsHookExW(WH_MOUSE_LL, self._proc, None, 0)
+        if not self._hook_handle:
+            log_err("✗ Impossible d'installer le hook souris bas niveau")
+            return
+        log("✓ Hook souris bas niveau installé (x2 supprimé pour les autres applis)")
+
+        # Boucle de messages — nécessaire pour recevoir les événements du hook
+        msg = ctypes.wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+        user32.UnhookWindowsHookEx(self._hook_handle)
+
+    def stop(self):
+        """Arrête le hook proprement."""
+        if self._thread_id:
+            user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)  # WM_QUIT
+
+
+# ── Détection de fenêtre active ───────────────────────────────
+
+_kernel32 = ctypes.windll.kernel32
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def get_focused_process_name() -> str:
+    """Retourne le nom du processus de la fenêtre actuellement au premier plan."""
+    try:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not handle:
+            return ""
+        buf = ctypes.create_unicode_buffer(260)
+        size = ctypes.wintypes.DWORD(260)
+        ok = _kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
+        _kernel32.CloseHandle(handle)
+        if ok:
+            return os.path.basename(buf.value).lower()
+    except Exception:
+        pass
+    return ""
+
+
+def is_terminal_focused() -> bool:
+    """Retourne True si une fenêtre de terminal est active.
+
+    Utilisé pour sauter le Ctrl+C de capture de sélection (qui interrompt
+    les process dans un terminal). Indépendant de TERMINAL_DETECTION.
+    """
+    return get_focused_process_name() in TERMINAL_BLACKLIST
+
+
 # ── Vocabulaire ──────────────────────────────────────────────
 
 class VocabManager:
@@ -157,10 +349,11 @@ class VocabManager:
         self.vocab_file = vocab_file
         self.hint_words = list(HINT_WORDS)
         self.replacements = dict(DEFAULT_REPLACEMENTS)
+        self._compiled_replacements = []  # Liste de (pattern_compilé, correction)
         self._load()
 
     def _load(self):
-        """Charge le vocabulaire depuis le fichier JSON."""
+        """Charge le vocabulaire depuis le fichier JSON et pré-compile les regex."""
         if os.path.exists(self.vocab_file):
             try:
                 with open(self.vocab_file, "r", encoding="utf-8") as f:
@@ -178,6 +371,13 @@ class VocabManager:
                 log(f"⚠ Erreur lecture vocabulaire : {e}")
         else:
             self._save_default()
+
+        # Pré-compilation des regex — une seule fois au chargement
+        self._compiled_replacements = [
+            (re.compile(re.escape(wrong), re.IGNORECASE), correct)
+            for wrong, correct in self.replacements.items()
+            if not wrong.startswith("#")
+        ]
 
     def _save_default(self):
         """Crée le fichier vocabulaire.json avec des exemples."""
@@ -215,15 +415,11 @@ class VocabManager:
         return ", ".join(words) + ". "
 
     def apply_replacements(self, text: str) -> str:
-        """Applique les remplacements de vocabulaire sur le texte transcrit."""
-        if not self.replacements:
-            return text
-        for wrong, correct in self.replacements.items():
-            if wrong.startswith("#"):
-                continue
-            # Remplacement insensible à la casse mais préserve la structure
-            import re
-            pattern = re.compile(re.escape(wrong), re.IGNORECASE)
+        """Applique les remplacements de vocabulaire sur le texte transcrit.
+
+        Les regex sont pré-compilées dans _load() — aucun coût à chaque appel.
+        """
+        for pattern, correct in self._compiled_replacements:
             text = pattern.sub(correct, text)
         return text
 
@@ -359,13 +555,12 @@ class VoiceTyper:
     def __init__(self):
         self.is_recording = False
         self.is_processing = False
-        self.audio_chunks = []
+        self.audio_queue = queue.Queue()  # Thread-safe, sans alloc dynamique dans le callback
         self.stream = None
         self.model = None
-        self.kb = KBController()
         self.ptt_button = get_mouse_button(MOUSE_BUTTON)
-        self.selected_text_on_start = None
         self._record_channels = 1
+        self._mouse_hook = None   # Hook souris bas niveau (mode mouse)
 
         # Auto-détection du micro si besoin
         global AUDIO_DEVICE
@@ -390,11 +585,14 @@ class VoiceTyper:
         # Vocabulaire custom
         self.vocab = VocabManager(VOCAB_FILE)
 
+        self.is_paused = False
+
         # Icônes pour le tray
         self.icon_idle = create_tray_icon((100, 100, 100))       # Gris
-        self.icon_loading = create_tray_icon((255, 165, 0))      # Orange
+        self.icon_loading = create_tray_icon((200, 200, 50))     # Jaune (chargement)
         self.icon_recording = create_tray_icon((220, 40, 40))    # Rouge
         self.icon_processing = create_tray_icon((40, 120, 220))  # Bleu
+        self.icon_paused = create_tray_icon((200, 130, 20))      # Orange (pause)
 
         # System tray
         self.tray = pystray.Icon(
@@ -402,7 +600,7 @@ class VoiceTyper:
             icon=self.icon_loading,
             title="VoiceTyper — Chargement du modèle...",
             menu=pystray.Menu(
-                pystray.MenuItem("VoiceTyper v1.1", None, enabled=False),
+                pystray.MenuItem("VoiceTyper v1.3", None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem(
                     f"Mode: {PTT_MODE} ({MOUSE_BUTTON if PTT_MODE == 'mouse' else 'ctrl_r'})",
@@ -414,6 +612,11 @@ class VoiceTyper:
                     f"Vocab: {len(self.vocab.hint_words)} mots",
                     None,
                     enabled=False,
+                ),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(
+                    lambda item: "▶ Reprendre" if self.is_paused else "⏸ Mettre en pause",
+                    self._toggle_pause,
                 ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quitter", self._quit),
@@ -439,11 +642,18 @@ class VoiceTyper:
         log("  (Le 1er lancement télécharge le modèle ~3 Go)")
         log("")
 
+        # Ajustement automatique du compute_type pour CPU
+        # float16 n'est pas supporté par CTranslate2 sur CPU → fallback sur int8
+        actual_compute_type = COMPUTE_TYPE
+        if WHISPER_DEVICE == "cpu" and COMPUTE_TYPE == "float16":
+            actual_compute_type = "int8"
+            log("  ⚠ Avertissement : float16 incompatible avec CPU → bascule automatique sur int8")
+
         try:
             self.model = WhisperModel(
                 WHISPER_MODEL,
                 device=WHISPER_DEVICE,
-                compute_type=COMPUTE_TYPE,
+                compute_type=actual_compute_type,
             )
             log("  ✓ Modèle chargé avec succès ")
             log("")
@@ -459,7 +669,7 @@ class VoiceTyper:
     def _print_ready(self):
         """Affiche les infos de fonctionnement."""
         log("  ┌──────────────────────────────────────────┐")
-        log("  │          VoiceTyper v1.1 prêt            │")
+        log("  │          VoiceTyper v1.3 prêt            │")
         log("  ├──────────────────────────────────────────┤")
         if PTT_MODE == "mouse":
             btn_name = "avant (x2)" if MOUSE_BUTTON == "x2" else "arrière (x1)"
@@ -471,46 +681,12 @@ class VoiceTyper:
         log("  │  Texte sélectionné → remplacé            │")
         log("  │                                          │")
         log("  │             Icône tray  :                │")
-        log("  │    Gris = veille | Rouge = écoute        │")
-        log("  │    Bleu = transcription                  │")
+        log("  │  Gris=veille | Rouge=écoute | Bleu=transco│")
+        log("  │  Orange=pause (terminal détecté ou manuel)│")
         log("  │                                          │")
         log("  │  Vocabulaire : édite vocabulaire.json    │")
         log("  └──────────────────────────────────────────┘")
         log("")
-
-    # ── Capture de la sélection ──────────────────────────────
-
-    def _capture_selection(self):
-        """Capture le texte actuellement sélectionné via Ctrl+C."""
-        try:
-            # Sauvegarder le presse-papiers actuel
-            old_clipboard = pyperclip.paste()
-        except Exception:
-            old_clipboard = ""
-
-        try:
-            # Vider le presse-papiers
-            pyperclip.copy("")
-            time.sleep(0.02)
-
-            # Ctrl+C pour copier la sélection
-            win_ctrl_c()
-            time.sleep(0.08)  # Laisser le temps au Ctrl+C
-
-            # Vérifier si quelque chose a été copié
-            current = pyperclip.paste()
-
-            if current and current != old_clipboard:
-                self.selected_text_on_start = current
-                log(f"→ Texte sélectionné détecté ({len(current)} car.) → sera remplacé")
-            else:
-                self.selected_text_on_start = None
-
-            # Restaurer le presse-papiers original
-            pyperclip.copy(old_clipboard)
-
-        except Exception:
-            self.selected_text_on_start = None
 
     # ── Enregistrement audio ─────────────────────────────────
 
@@ -531,20 +707,31 @@ class VoiceTyper:
             log_err(f"✗ Erreur ouverture stream audio : {e}")
 
     def _audio_callback(self, indata, frames, time_info, status):
-        """Callback appelé par sounddevice — collecte uniquement si enregistrement actif."""
+        """Callback appelé par sounddevice — collecte uniquement si enregistrement actif.
+
+        queue.put() est non-bloquant et thread-safe : pas d'alloc dynamique de liste
+        dans le thread audio haute priorité → élimine les risques de dropout/craquement.
+        """
         if self.is_recording:
-            self.audio_chunks.append(indata.copy())
+            self.audio_queue.put(indata.copy())
 
     def start_recording(self):
         """Démarre la collecte audio (le stream reste ouvert)."""
         if self.is_recording or self.is_processing or self.model is None:
             return
 
-        # Capturer la sélection AVANT de commencer l'enregistrement
-        self._capture_selection()
+        # Ne pas démarrer si en pause manuelle
+        if self.is_paused:
+            return
+
+        # Ignorer le PTT si un terminal est au premier plan (mode clavier uniquement)
+        if TERMINAL_DETECTION and is_terminal_focused():
+            return
 
         self.is_recording = True
-        self.audio_chunks = []
+        # Vider la queue des résidus audio avant de commencer
+        with self.audio_queue.mutex:
+            self.audio_queue.queue.clear()
 
         # Feedback visuel + sonore
         self.tray.icon = self.icon_recording
@@ -571,11 +758,19 @@ class VoiceTyper:
     def _process_audio(self):
         """Transcrit l'audio enregistré et tape le texte."""
         try:
-            if not self.audio_chunks:
+            # Drainer la queue — récupère tous les chunks sans bloquer
+            chunks = []
+            while not self.audio_queue.empty():
+                try:
+                    chunks.append(self.audio_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            if not chunks:
                 return
 
             # Assembler les chunks audio
-            audio = np.concatenate(self.audio_chunks, axis=0)
+            audio = np.concatenate(chunks, axis=0)
             # Convertir en mono si stéréo (moyenne des canaux)
             if audio.ndim > 1 and audio.shape[1] > 1:
                 audio = audio.mean(axis=1)
@@ -602,12 +797,11 @@ class VoiceTyper:
             segments, info = self.model.transcribe(
                 audio,
                 language=None,        # Auto-détection FR/EN
-                beam_size=5,
-                best_of=5,
+                beam_size=2,          # 1-2 = latence /2 à /3, qualité quasi-identique sur voix claire
                 initial_prompt=initial_prompt if initial_prompt else None,
                 vad_filter=True,
                 vad_parameters=dict(
-                    threshold=0.3,
+                    threshold=VAD_THRESHOLD,
                     min_silence_duration_ms=200,
                     speech_pad_ms=300,
                     min_speech_duration_ms=100,
@@ -630,9 +824,8 @@ class VoiceTyper:
             prob = f"{info.language_probability:.0%}" if info else "?"
 
             if text:
-                mode = "REMPLACE" if self.selected_text_on_start else "INSERT"
-                log(f"OK ({elapsed:.1f}s, {lang} {prob}) [{mode}]")
-                log("→ \"{text}\"")
+                log(f"OK ({elapsed:.1f}s, {lang} {prob})")
+                log(f"→ \"{text}\"")
                 self._type_text(text)
             else:
                 log(f"(aucun texte détecté, {elapsed:.1f}s)")
@@ -641,64 +834,61 @@ class VoiceTyper:
             log_err(f"✗ Erreur transcription : {e}")
         finally:
             self.is_processing = False
-            self.selected_text_on_start = None
             self._set_idle()
 
     # ── Frappe du texte ──────────────────────────────────────
 
     def _type_text(self, text: str):
-        """Tape le texte là où est le curseur. Remplace la sélection si il y en avait une."""
-        if ADD_TRAILING_SPACE and not self.selected_text_on_start:
-            # Pas d'espace trailing en mode remplacement
+        """Colle le texte transcrit là où est le curseur via le presse-papiers.
+
+        Utilise exclusivement l'API Windows (win_ctrl_v / win_ctrl_shift_v)
+        au lieu de pynput — plus fiable sur les applis lancées en Administrateur.
+        """
+        if ADD_TRAILING_SPACE:
             text = text + " "
 
-        # Sauvegarder le presse-papiers actuel
-        try:
-            old_clipboard = pyperclip.paste()
-        except Exception:
-            old_clipboard = ""
+        # Lecture de l'ancien presse-papiers avec retry
+        old_clipboard = ""
+        for _ in range(3):
+            try:
+                old_clipboard = pyperclip.paste()
+                break
+            except Exception:
+                time.sleep(0.05)
 
         try:
-            # Si du texte était sélectionné, on doit re-sélectionner
-            # car le clic souris a pu désélectionner
-            if self.selected_text_on_start:
-                # Stratégie : on utilise Ctrl+Z pour annuler la désélection
-                # potentielle, puis on re-sélectionne via recherche du texte
-                # Approche plus simple et fiable : on utilise le fait que
-                # la plupart des apps gardent la position du curseur.
-                # On sélectionne en arrière la longueur du texte original.
-                sel_len = len(self.selected_text_on_start)
+            # Copie du texte avec retry
+            for attempt in range(3):
+                try:
+                    pyperclip.copy(text)
+                    break
+                except Exception:
+                    if attempt == 2:
+                        log_err("✗ Impossible de copier dans le presse-papiers après 3 essais")
+                        return
+                    time.sleep(0.05)
 
-                # Shift+Home puis Shift+End ne marche pas universellement.
-                # Méthode la plus fiable : copier le texte sélectionné dans
-                # le clipboard et faire Ctrl+V directement.
-                # Si la sélection est encore active → Ctrl+V la remplace.
-                # Si la sélection a été perdue → on tape quand même le texte.
-                pass
-
-            # Copier le texte transcrit dans le presse-papiers
-            pyperclip.copy(text)
             time.sleep(PASTE_DELAY)
 
-            # Coller via pynput (moins d'interférence audio que keybd_event)
-            self.kb.press(Key.ctrl_l)
-            self.kb.press('v')
-            self.kb.release('v')
-            self.kb.release(Key.ctrl_l)
+            if is_terminal_focused():
+                # Dans un terminal, Ctrl+Shift+V est le raccourci standard de collage
+                win_ctrl_shift_v()
+            else:
+                win_ctrl_v()
 
             time.sleep(PASTE_DELAY)
 
         except Exception as e:
             log_err(f"✗ Erreur de frappe : {e}")
         finally:
-            # Restaurer le presse-papiers après un court délai
             def restore():
-                time.sleep(0.5)
-                try:
-                    pyperclip.copy(old_clipboard)
-                except Exception:
-                    pass
-
+                time.sleep(0.1)   # Réduit de 0.5 → 0.1s : fenêtre de race condition minimisée
+                for _ in range(3):
+                    try:
+                        pyperclip.copy(old_clipboard)
+                        break
+                    except Exception:
+                        time.sleep(0.05)
             threading.Thread(target=restore, daemon=True).start()
 
     # ── Listeners (souris / clavier) ─────────────────────────
@@ -723,14 +913,34 @@ class VoiceTyper:
 
     # ── Utilitaires ──────────────────────────────────────────
 
+    def _toggle_pause(self, icon=None, item=None):
+        """Bascule entre pause et veille active."""
+        self.is_paused = not self.is_paused
+        if self.is_paused:
+            self.tray.icon = self.icon_paused
+            self.tray.title = "VoiceTyper — En pause (clic droit → Reprendre)"
+            log("⏸ VoiceTyper mis en pause")
+        else:
+            self._set_idle()
+            log("▶ VoiceTyper repris")
+
     def _set_idle(self):
         """Remet l'icône en mode veille."""
-        self.tray.icon = self.icon_idle
-        self.tray.title = "VoiceTyper — En veille (prêt)"
+        if self.is_paused:
+            self.tray.icon = self.icon_paused
+            self.tray.title = "VoiceTyper — En pause (clic droit → Reprendre)"
+        else:
+            self.tray.icon = self.icon_idle
+            self.tray.title = "VoiceTyper — En veille (prêt)"
 
     def _quit(self, icon, item):
         """Quitte l'application proprement."""
         log("\n  VoiceTyper arrêté")
+        if self._mouse_hook:
+            try:
+                self._mouse_hook.stop()
+            except Exception:
+                pass
         if self.stream:
             try:
                 self.stream.stop()
@@ -752,9 +962,14 @@ class VoiceTyper:
 
         # Démarrer le listener approprié
         if PTT_MODE == "mouse":
-            listener = mouse.Listener(on_click=self._on_mouse_click)
-            listener.start()
-            log("  → Listener souris démarré")
+            # Hook bas niveau : x2 supprimé → le terminal ne voit pas le clic
+            self._mouse_hook = MouseHook(
+                MOUSE_BUTTON,
+                on_press=self.start_recording,
+                on_release=self.stop_recording,
+            )
+            self._mouse_hook.start()
+            log(f"  → Hook souris bas niveau démarré (bouton {MOUSE_BUTTON} supprimé)")
         else:
             listener = keyboard.Listener(
                 on_press=self._on_key_press,
@@ -778,7 +993,7 @@ if __name__ == "__main__":
 
     log("")
     log("  ╔═══════════════════════════════════════╗")
-    log("  ║        VoiceTyper v1.1                ║")
+    log("  ║        VoiceTyper v1.3                ║")
     log("  ╚═══════════════════════════════════════╝")
     log("")
 

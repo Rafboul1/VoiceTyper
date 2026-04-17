@@ -743,3 +743,89 @@
 11:26:23  Detected language 'fr' with probability 0.98
 11:26:24  OK (2.5s, fr 98%) [INSERT]
 11:26:24  → "{text}"
+09:36:17  
+09:36:17    ╔═══════════════════════════════════════╗
+09:36:17    ║        VoiceTyper v1.1                ║
+09:36:17    ╚═══════════════════════════════════════╝
+09:36:17  
+09:36:17    🔍 Auto-détection du micro...
+09:36:18    [1] Réseau de microphones (Realtek( → OK ✓
+09:36:18  ✓ Micro sélectionné : device 1
+09:36:18  
+09:36:18  ✓ Fichier vocabulaire créé : C:\Users\visit\Rafboul\VoiceTyper\vocabulaire.json
+09:36:18      Édite-le pour ajouter tes mots persos !
+09:36:18  ✓ Stream audio ouvert en permanence
+09:36:18  ==================================================
+09:36:18    VoiceTyper — Chargement du modèle Whisper
+09:36:18    Modèle : large-v3 | Device : cuda
+09:36:18  ==================================================
+09:36:18  
+09:36:18    Utilisation du GPU (CUDA)
+09:36:18    Téléchargement/chargement de 'large-v3'...
+09:36:18    (Le 1er lancement télécharge le modèle ~3 Go)
+09:36:18  
+09:36:18    → Listener souris démarré
+09:36:18    → Lancement du system tray...
+09:36:18  
+09:36:32    ✓ Modèle chargé avec succès 
+09:36:32  
+09:36:32    ┌──────────────────────────────────────────┐
+09:36:32    │          VoiceTyper v1.1 prêt            │
+09:36:32    ├──────────────────────────────────────────┤
+09:36:32    │  Bouton souris avant (x2) = push-to-talk │
+09:36:32    │                                          │
+09:36:32    │  Parle → texte tapé au curseur           │
+09:36:32    │  Texte sélectionné → remplacé            │
+09:36:32    │                                          │
+09:36:32    │             Icône tray  :                │
+09:36:32    │    Gris = veille | Rouge = écoute        │
+09:36:32    │    Bleu = transcription                  │
+09:36:32    │                                          │
+09:36:32    │  Vocabulaire : édite vocabulaire.json    │
+09:36:32    └──────────────────────────────────────────┘
+09:36:32  
+09:37:49  
+  VoiceTyper arrêté
+09:37:52  
+09:37:52    ╔═══════════════════════════════════════╗
+09:37:52    ║        VoiceTyper v1.1                ║
+09:37:52    ╚═══════════════════════════════════════╝
+09:37:52  
+09:37:52    🔍 Auto-détection du micro...
+09:37:52    [1] Réseau de microphones (Realtek( → OK ✓
+09:37:52  ✓ Micro sélectionné : device 1
+09:37:52  
+09:37:52  ⚠ Erreur lecture vocabulaire : Expecting ',' delimiter: line 11 column 5 (char 427)
+09:37:52  ✓ Stream audio ouvert en permanence
+09:37:52  ==================================================
+09:37:52    VoiceTyper — Chargement du modèle Whisper
+09:37:52    Modèle : large-v3 | Device : cuda
+09:37:52  ==================================================
+09:37:52  
+09:37:52    Utilisation du GPU (CUDA)
+09:37:52    Téléchargement/chargement de 'large-v3'...
+09:37:52    (Le 1er lancement télécharge le modèle ~3 Go)
+09:37:52  
+09:37:52    → Listener souris démarré
+09:37:52    → Lancement du system tray...
+09:37:52  
+09:37:53  HTTP Request: GET https://huggingface.co/api/models/Systran/faster-whisper-large-v3/revision/main "HTTP/1.1 200 OK"
+09:37:58    ✓ Modèle chargé avec succès 
+09:37:58  
+09:37:59    ┌──────────────────────────────────────────┐
+09:37:59    │          VoiceTyper v1.1 prêt            │
+09:37:59    ├──────────────────────────────────────────┤
+09:37:59    │  Bouton souris avant (x2) = push-to-talk │
+09:37:59    │                                          │
+09:37:59    │  Parle → texte tapé au curseur           │
+09:37:59    │  Texte sélectionné → remplacé            │
+09:37:59    │                                          │
+09:37:59    │             Icône tray  :                │
+09:37:59    │    Gris = veille | Rouge = écoute        │
+09:37:59    │    Bleu = transcription                  │
+09:37:59    │                                          │
+09:37:59    │  Vocabulaire : édite vocabulaire.json    │
+09:37:59    └──────────────────────────────────────────┘
+09:37:59  
+09:38:20  
+  VoiceTyper arrêté
