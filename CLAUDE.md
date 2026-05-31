@@ -36,19 +36,30 @@ Dictée vocale locale Windows via faster-whisper (Whisper large-v3 GPU). Push-to
 - Avant toute modif hook souris : vérifier non-régression terminal (Claude Code, PowerShell)
 - `venv/` ne doit pas être commité
 
+**Perf observée** : large-v3 sur ce GPU transcrit à RTF ~0,3 (ex. 7,7 s d'audio → 1,8 s) — marge confortable pour du streaming par segments.
+
 **Workflow release** : modifier `voice_typer.py` → tester (terminal + app + admin) → mettre à jour Changelog dans `README.md` → commit + push GitHub
 
 ## État actuel
 
-v1.3 stable, publié sur GitHub. Pas de features en cours.
+v1.3 stable, publié sur GitHub — mode bloc : la transcription se fait en une passe à la fin du push-to-talk.
+
+Chantier en cours sur la branche `feat/streaming-dictee` : **streaming append-only de la dictée** — le texte se pose au fil de l'eau (par segments, frontière = silence OU durée max) au lieu d'attendre le relâchement, pour tuer la latence perçue sur les gros textes. Réversible via flag `STREAMING_MODE`. Design validé, spec écrit (`specs/2026-05-31-streaming-dictee-design.md`) ; plan d'implémentation et code restent à faire.
+
+## Décisions
+
+### 2026-05-31 — Streaming append-only, sans auto-correction
+Le texte se pose par segments au fil de l'eau, jamais réécrit. Tue la latence perçue sur les gros textes. Rejeté : auto-correction rétroactive type Apple (fenêtre glissante / LocalAgreement) → re-décodage en boucle + charge GPU + backspaces fragiles (frappe par presse-papier), pour un confort déjà acquis à ~80 % en mode bloc.
+
+### 2026-05-31 — Worktree hors vault via git fallback
+Worktree créé par `git worktree add` dans `~/.config/superpowers/worktrees/VoiceTyper/streaming-dictee` (branche `feat/streaming-dictee`). Rejeté : outil natif `EnterWorktree` → cible le repo vault (racine), interdit + mauvais repo. Hors vault → pas de churn Syncthing, master reste la v1.3 intacte. venv existant réutilisé (pas de réinstall des deps).
 
 ## Dernière session
 
-**Date** : — (session non datée)
+**Date** : 2026-05-31
 **Fait** :
-- Migration vers le nouveau format CLAUDE.md unique (suppression index.md)
-- README conservé tel quel (projet publié sur GitHub)
-- CLAUDE.md reformaté au nouveau format
-
-**État** : Terminé — index.md supprimé, CLAUDE.md propre
-**Reprise** : Aucune action en attente — projet stable v1.3
+- Design de la feature streaming append-only de la dictée (cf. `## Décisions`)
+- Spec écrit + commité : `specs/2026-05-31-streaming-dictee-design.md`
+- Worktree isolé `feat/streaming-dictee` créé hors vault
+**État** : partiel — design validé, spec écrit ; plan + code à faire
+**Reprise** : `writing-plans` (plan d'implémentation) puis TDD sur `voice_typer.py`
