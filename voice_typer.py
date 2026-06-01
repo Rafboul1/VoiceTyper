@@ -1,5 +1,5 @@
 """
-VoiceTyper v1.3 - Dictée vocale locale push-to-talk pour Windows
+VoiceTyper v1.4 - Dictée vocale locale push-to-talk pour Windows
 =================================================================
 Utilise faster-whisper sur GPU pour transcrire ta voix en texte
 partout sur ton PC (system-wide).
@@ -102,7 +102,7 @@ ADD_TRAILING_SPACE = True        # Ajouter un espace après le texte transcrit
 STREAMING_MODE = True
 STREAM_MAX_SEGMENT_SEC = 7        # Filet : coupe forcée d'un segment si aucun silence
 STREAM_SILENCE_MS = 600          # Durée de silence continu qui déclenche une frontière
-STREAM_SILENCE_RMS = 0.01        # Seuil d'énergie RMS sous lequel un bloc est du silence
+STREAM_SILENCE_RMS = 0.02        # Seuil d'énergie RMS sous lequel un bloc est du silence
 #                                  ⚠ à calibrer sur ton micro + AUDIO_GAIN (voir Task 6)
 
 # --- Exclusion de terminaux ---
@@ -664,7 +664,7 @@ class VoiceTyper:
             icon=self.icon_loading,
             title="VoiceTyper — Chargement du modèle...",
             menu=pystray.Menu(
-                pystray.MenuItem("VoiceTyper v1.3", None, enabled=False),
+                pystray.MenuItem("VoiceTyper v1.4", None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem(
                     f"Mode: {PTT_MODE} ({MOUSE_BUTTON if PTT_MODE == 'mouse' else 'ctrl_r'})",
@@ -733,7 +733,7 @@ class VoiceTyper:
     def _print_ready(self):
         """Affiche les infos de fonctionnement."""
         log("  ┌──────────────────────────────────────────┐")
-        log("  │          VoiceTyper v1.3 prêt            │")
+        log("  │          VoiceTyper v1.4 prêt            │")
         log("  ├──────────────────────────────────────────┤")
         if PTT_MODE == "mouse":
             btn_name = "avant (x2)" if MOUSE_BUTTON == "x2" else "arrière (x1)"
@@ -1156,7 +1156,7 @@ if __name__ == "__main__":
 
     log("")
     log("  ╔═══════════════════════════════════════╗")
-    log("  ║        VoiceTyper v1.3                ║")
+    log("  ║        VoiceTyper v1.4                ║")
     log("  ╚═══════════════════════════════════════╝")
     log("")
 
