@@ -10,6 +10,9 @@ vocabulaire.json
 *.bin
 *.pt
 
+# Log volatil (régénéré à chaque run)
+voice_typer.log
+
 # OS
 Thumbs.db
 .DS_Store
