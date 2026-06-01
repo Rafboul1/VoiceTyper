@@ -190,10 +190,31 @@ Tout se configure dans les premières lignes de `voice_typer.py` :
 | `VAD_THRESHOLD` | `0.5` | Seuil de détection vocale : `0.3` = très sensible, `0.5` = recommandé, `0.7` = strict |
 | `TERMINAL_DETECTION` | `False` | Ignorer le PTT quand un terminal est au premier plan (fonctionne en mode souris ET clavier) |
 | `TERMINAL_BLACKLIST` | voir code | Liste des processus terminaux à exclure |
+| `STREAMING_MODE` | `True` | Affiche la dictée au fil de l'eau par segments (`False` = transcription en une passe à la fin) |
+| `STREAM_MAX_SEGMENT_SEC` | `7` | Streaming : coupe forcée d'un segment si aucun silence n'est détecté |
+| `STREAM_SILENCE_MS` | `600` | Streaming : durée de silence continu qui déclenche une coupure |
+| `STREAM_SILENCE_RMS` | `0.02` | Streaming : seuil d'énergie sous lequel c'est du silence (à calibrer sur ton micro) |
 
 ---
 
 ## Changelog
+
+### v1.4 — Streaming append-only de la dictée
+
+**Nouveau : la dictée s'affiche au fil de l'eau**
+
+- Le texte se pose **par segments pendant que tu parles**, au lieu d'attendre le relâchement du bouton. Sur une longue dictée, fini d'attendre qu'un gros bloc apparaisse à la fin.
+- **Découpage** sur frontière = silence détecté (`STREAM_SILENCE_RMS`) **ou** durée max atteinte (`STREAM_MAX_SEGMENT_SEC`, filet de 7 s). Append-only : jamais de réécriture rétroactive, ce qui est tapé reste tapé.
+- **Réversible** : `STREAMING_MODE = False` restaure le comportement v1.3 (transcription en une passe au relâchement).
+- Le contexte du segment précédent est passé à Whisper en `initial_prompt` pour la continuité aux jointures.
+- Effet de bord apprécié : les courtes pauses imposées par le découpage aident à poser sa pensée au lieu de débiter d'un trait.
+
+**Nouveaux paramètres configurables**
+
+- `STREAMING_MODE = True` — active le streaming (`False` = comportement v1.3).
+- `STREAM_MAX_SEGMENT_SEC = 7` — filet : coupe forcée d'un segment si aucun silence.
+- `STREAM_SILENCE_MS = 600` — durée de silence continu qui déclenche une coupure.
+- `STREAM_SILENCE_RMS = 0.02` — seuil d'énergie sous lequel un bloc est du silence (à calibrer sur ton micro + `AUDIO_GAIN`).
 
 ### v1.3 — Optimisations fiabilité & performance
 

@@ -42,9 +42,7 @@ Dictée vocale locale Windows via faster-whisper (Whisper large-v3 GPU). Push-to
 
 ## État actuel
 
-v1.3 stable, publié sur GitHub — mode bloc : la transcription se fait en une passe à la fin du push-to-talk.
-
-Chantier en cours sur la branche `feat/streaming-dictee` : **streaming append-only de la dictée** — le texte se pose au fil de l'eau (par segments, frontière = silence OU durée max) au lieu d'attendre le relâchement, pour tuer la latence perçue sur les gros textes. Réversible via flag `STREAMING_MODE`. Design validé, spec écrit (`specs/2026-05-31-streaming-dictee-design.md`) ; plan d'implémentation et code restent à faire.
+v1.4 : **streaming append-only** livré sur la branche `feat/streaming-dictee` (pas encore mergé dans `master`) — le texte se pose au fil de l'eau (segments, frontière = silence RMS OU durée max 7 s) au lieu d'attendre le relâchement. Réversible via `STREAMING_MODE` ; mode bloc v1.3 conservé à l'identique. `STREAM_SILENCE_RMS` calibré à `0.02` à l'usage (plafond d'un détecteur à seuil fixe — pas perfectible au bouton). Détecteur de frontière testé (`test_segmentation.py`, 5 tests, lancé via le venv du repo principal) ; collage/threads/GPU validés manuellement (pauses, flot continu, terminal, A/B mode bloc).
 
 ## Décisions
 
@@ -56,10 +54,10 @@ Worktree créé par `git worktree add` dans `~/.config/superpowers/worktrees/Voi
 
 ## Dernière session
 
-**Date** : 2026-05-31
+**Date** : 2026-06-01
 **Fait** :
-- Design de la feature streaming append-only de la dictée (cf. `## Décisions`)
-- Spec écrit + commité : `specs/2026-05-31-streaming-dictee-design.md`
-- Worktree isolé `feat/streaming-dictee` créé hors vault
-**État** : partiel — design validé, spec écrit ; plan + code à faire
-**Reprise** : `writing-plans` (plan d'implémentation) puis TDD sur `voice_typer.py`
+- Implémenté le streaming append-only (plan `plans/2026-06-01-streaming-dictee-impl.md`)
+- `BoundaryDetector` + tests, refactor `_transcribe_audio` / collage incrémental, `_stream_loop` + câblage start/stop, bump v1.4
+- Calibrage `STREAM_SILENCE_RMS = 0.02` validé à l'oreille
+**État** : terminé — validé manuellement (pauses OK, flot continu OK, ressenti bon)
+**Reprise** : merger `feat/streaming-dictee` → `master` puis push GitHub ; supprimer le plan livré
