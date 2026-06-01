@@ -433,6 +433,53 @@ class VocabManager:
         return text
 
 
+# ── Détection de frontière de segment (streaming) ────────────
+
+class BoundaryDetector:
+    """Décide où couper un segment pendant le streaming de la dictée.
+
+    Émet une frontière quand, depuis le dernier reset :
+      - de la parole a été captée ET un silence continu >= silence_ms est observé, OU
+      - le buffer atteint max_segment_sec (filet, même sans silence).
+
+    Logique pure numpy : aucune dépendance audio/GPU, donc testable en isolation.
+    Alimenté bloc par bloc via feed() ; l'unité de comptage interne est l'échantillon.
+    """
+
+    def __init__(self, sample_rate, silence_rms, silence_ms, max_segment_sec):
+        self.sample_rate = sample_rate
+        self.silence_rms = silence_rms
+        self._silence_samples_needed = int(silence_ms / 1000.0 * sample_rate)
+        self._max_samples = int(max_segment_sec * sample_rate)
+        self.reset()
+
+    def reset(self):
+        """Repart à zéro (après l'émission d'une frontière ou pour un nouveau segment)."""
+        self._buffer_samples = 0
+        self._silence_run = 0
+        self._has_speech = False
+
+    def feed(self, chunk):
+        """Ingère un bloc audio mono float32. Retourne True si une frontière est atteinte."""
+        n = len(chunk)
+        if n == 0:
+            return False
+        self._buffer_samples += n
+        rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
+        if rms >= self.silence_rms:
+            self._has_speech = True
+            self._silence_run = 0
+        else:
+            self._silence_run += n
+        if not self._has_speech:
+            return False
+        if self._buffer_samples >= self._max_samples:
+            return True
+        if self._silence_run >= self._silence_samples_needed:
+            return True
+        return False
+
+
 # ── Auto-détection du micro ───────────────────────────────────
 
 def auto_detect_microphone():
