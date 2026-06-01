@@ -1,5 +1,5 @@
 """
-VoiceTyper v1.4 - Dictée vocale locale push-to-talk pour Windows
+VoiceTyper v1.5 - Dictée vocale locale push-to-talk pour Windows
 =================================================================
 Utilise faster-whisper sur GPU pour transcrire ta voix en texte
 partout sur ton PC (system-wide).
@@ -23,6 +23,7 @@ import logging
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
+from faster_whisper.vad import get_vad_model
 from pynput import mouse, keyboard
 from pynput.keyboard import Key
 import pystray
@@ -102,8 +103,11 @@ ADD_TRAILING_SPACE = True        # Ajouter un espace après le texte transcrit
 STREAMING_MODE = True
 STREAM_MAX_SEGMENT_SEC = 7        # Filet : coupe forcée d'un segment si aucun silence
 STREAM_SILENCE_MS = 600          # Durée de silence continu qui déclenche une frontière
-STREAM_SILENCE_RMS = 0.02        # Seuil d'énergie RMS sous lequel un bloc est du silence
-#                                  ⚠ à calibrer sur ton micro + AUDIO_GAIN (voir Task 6)
+# Détection parole/silence par Silero VAD (modèle ML déjà embarqué dans faster-whisper).
+# Seuil de probabilité de parole : >= seuil = parole. L'hystérésis anti-flicker
+# (neg_threshold) est dérivée automatiquement. Bien plus stable d'un environnement à
+# l'autre que l'ancien seuil d'énergie RMS — indépendant du micro et de AUDIO_GAIN.
+STREAM_SPEECH_THRESHOLD = 0.5    # 0.3 = sensible, 0.5 = recommandé, 0.7 = strict
 
 # --- Exclusion de terminaux ---
 # Si TERMINAL_DETECTION = True, le PTT est ignoré quand un terminal est au premier plan.
@@ -435,20 +439,73 @@ class VocabManager:
 
 # ── Détection de frontière de segment (streaming) ────────────
 
+VAD_WINDOW = 512  # Silero traite l'audio par fenêtres de 512 samples @ 16 kHz (~32 ms)
+
+
+class SileroClassifier:
+    """Classe parole/silence avec le modèle Silero VAD embarqué dans faster-whisper.
+
+    Découpe le flux en fenêtres de 512 samples et retourne, pour chaque fenêtre
+    complétée, True (parole) / False (silence). Chaque fenêtre est évaluée avec ~1 s
+    de contexte glissant pour « réchauffer » le LSTM du modèle (sinon un appel froid
+    sur une fenêtre isolée est peu fiable). Hystérésis (threshold / neg_threshold)
+    pour éviter le flicker sur les transitions.
+
+    Le modèle est injectable pour les tests (défaut : modèle ONNX réel, déjà téléchargé).
+    """
+
+    def __init__(self, threshold, sample_rate, context_sec=1.0, model=None):
+        self.model = model if model is not None else get_vad_model()
+        self.threshold = threshold
+        self.neg_threshold = max(threshold - 0.15, 0.01)
+        self._context_samples = int(context_sec * sample_rate / VAD_WINDOW) * VAD_WINDOW
+        self.reset()
+
+    def reset(self):
+        """Vide le buffer d'alignement, le contexte glissant et l'état d'hystérésis."""
+        self._pending = np.empty(0, dtype=np.float32)
+        self._context = np.empty(0, dtype=np.float32)
+        self._speaking = False
+
+    def classify(self, chunk):
+        """Ingère un bloc mono float32. Retourne un bool par fenêtre de 512 complétée."""
+        self._pending = np.concatenate(
+            [self._pending, np.asarray(chunk, dtype=np.float32).ravel()]
+        )
+        verdicts = []
+        while len(self._pending) >= VAD_WINDOW:
+            window = self._pending[:VAD_WINDOW]
+            self._pending = self._pending[VAD_WINDOW:]
+            buffer = np.concatenate([self._context, window])
+            prob = float(self.model(buffer)[-1])  # proba de la fenêtre courante
+            verdicts.append(self._step(prob))
+            self._context = np.concatenate([self._context, window])[-self._context_samples:]
+        return verdicts
+
+    def _step(self, prob):
+        """Hystérésis : >= threshold = parole, < neg_threshold = silence, entre les
+        deux = on garde l'état précédent."""
+        if prob >= self.threshold:
+            self._speaking = True
+        elif prob < self.neg_threshold:
+            self._speaking = False
+        return self._speaking
+
+
 class BoundaryDetector:
     """Décide où couper un segment pendant le streaming de la dictée.
 
     Émet une frontière quand, depuis le dernier reset :
       - de la parole a été captée ET un silence continu >= silence_ms est observé, OU
-      - le buffer atteint max_segment_sec (filet, même sans silence).
+      - le segment atteint max_segment_sec (filet, même sans silence).
 
-    Logique pure numpy : aucune dépendance audio/GPU, donc testable en isolation.
-    Alimenté bloc par bloc via feed() ; l'unité de comptage interne est l'échantillon.
+    La classification parole/silence est déléguée à un classifieur injecté (Silero en
+    prod, fake déterministe en test) ; la logique de comptage reste pure et testable.
+    Alimenté bloc par bloc via feed().
     """
 
-    def __init__(self, sample_rate, silence_rms, silence_ms, max_segment_sec):
-        self.sample_rate = sample_rate
-        self.silence_rms = silence_rms
+    def __init__(self, sample_rate, silence_ms, max_segment_sec, classifier):
+        self.classifier = classifier
         self._silence_samples_needed = int(silence_ms / 1000.0 * sample_rate)
         self._max_samples = int(max_segment_sec * sample_rate)
         self.reset()
@@ -458,6 +515,7 @@ class BoundaryDetector:
         self._buffer_samples = 0
         self._silence_run = 0
         self._has_speech = False
+        self.classifier.reset()
 
     def feed(self, chunk):
         """Ingère un bloc audio mono float32. Retourne True si une frontière est atteinte."""
@@ -465,17 +523,18 @@ class BoundaryDetector:
         if n == 0:
             return False
         self._buffer_samples += n
-        rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
-        if rms >= self.silence_rms:
-            self._has_speech = True
-            self._silence_run = 0
-        else:
-            self._silence_run += n
-        if not self._has_speech:
-            return False
-        if self._buffer_samples >= self._max_samples:
-            return True
-        if self._silence_run >= self._silence_samples_needed:
+        for is_speech in self.classifier.classify(chunk):
+            if is_speech:
+                self._has_speech = True
+                self._silence_run = 0
+            else:
+                self._silence_run += VAD_WINDOW
+            # Frontière dès le franchissement du seuil de silence, sans attendre la fin
+            # du bloc : sinon une reprise de parole dans le même bloc remet le compteur
+            # à zéro et la frontière est manquée (reportée à la pause suivante / au filet).
+            if self._has_speech and self._silence_run >= self._silence_samples_needed:
+                return True
+        if self._has_speech and self._buffer_samples >= self._max_samples:
             return True
         return False
 
@@ -664,7 +723,7 @@ class VoiceTyper:
             icon=self.icon_loading,
             title="VoiceTyper — Chargement du modèle...",
             menu=pystray.Menu(
-                pystray.MenuItem("VoiceTyper v1.4", None, enabled=False),
+                pystray.MenuItem("VoiceTyper v1.5", None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem(
                     f"Mode: {PTT_MODE} ({MOUSE_BUTTON if PTT_MODE == 'mouse' else 'ctrl_r'})",
@@ -714,6 +773,12 @@ class VoiceTyper:
             log("  ⚠ Avertissement : float16 incompatible avec CPU → bascule automatique sur int8")
 
         try:
+            if STREAMING_MODE:
+                # Pré-charge Silero (lru_cache) AVANT d'exposer self.model : une fois
+                # self.model non-None, un PTT peut lancer start_recording → un 2e
+                # get_vad_model() concurrent (lru_cache pas thread-safe au 1er appel),
+                # d'où deux sessions ONNX. Hors du thread du hook souris au passage.
+                get_vad_model()
             self.model = WhisperModel(
                 WHISPER_MODEL,
                 device=WHISPER_DEVICE,
@@ -733,7 +798,7 @@ class VoiceTyper:
     def _print_ready(self):
         """Affiche les infos de fonctionnement."""
         log("  ┌──────────────────────────────────────────┐")
-        log("  │          VoiceTyper v1.4 prêt            │")
+        log("  │          VoiceTyper v1.5 prêt            │")
         log("  ├──────────────────────────────────────────┤")
         if PTT_MODE == "mouse":
             btn_name = "avant (x2)" if MOUSE_BUTTON == "x2" else "arrière (x1)"
@@ -801,7 +866,8 @@ class VoiceTyper:
             with self.audio_queue.mutex:
                 self.audio_queue.queue.clear()
             self.detector = BoundaryDetector(
-                SAMPLE_RATE, STREAM_SILENCE_RMS, STREAM_SILENCE_MS, STREAM_MAX_SEGMENT_SEC
+                SAMPLE_RATE, STREAM_SILENCE_MS, STREAM_MAX_SEGMENT_SEC,
+                SileroClassifier(STREAM_SPEECH_THRESHOLD, SAMPLE_RATE),
             )
             self._begin_paste_session()
             self.tray.icon = self.icon_recording
@@ -1156,7 +1222,7 @@ if __name__ == "__main__":
 
     log("")
     log("  ╔═══════════════════════════════════════╗")
-    log("  ║        VoiceTyper v1.4                ║")
+    log("  ║        VoiceTyper v1.5                ║")
     log("  ╚═══════════════════════════════════════╝")
     log("")
 

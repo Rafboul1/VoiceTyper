@@ -193,11 +193,29 @@ Tout se configure dans les premières lignes de `voice_typer.py` :
 | `STREAMING_MODE` | `True` | Affiche la dictée au fil de l'eau par segments (`False` = transcription en une passe à la fin) |
 | `STREAM_MAX_SEGMENT_SEC` | `7` | Streaming : coupe forcée d'un segment si aucun silence n'est détecté |
 | `STREAM_SILENCE_MS` | `600` | Streaming : durée de silence continu qui déclenche une coupure |
-| `STREAM_SILENCE_RMS` | `0.02` | Streaming : seuil d'énergie sous lequel c'est du silence (à calibrer sur ton micro) |
+| `STREAM_SPEECH_THRESHOLD` | `0.5` | Streaming : seuil de probabilité de parole (Silero VAD) ; `0.3` = sensible, `0.7` = strict |
 
 ---
 
 ## Changelog
+
+### v1.5 — Découpage par VAD (Silero) au lieu du seuil d'énergie
+
+**Le découpage des segments écoute la *parole*, plus seulement le volume**
+
+- La détection de frontière de segment passe d'un **seuil d'énergie RMS** (`STREAM_SILENCE_RMS`) à **Silero VAD**, le modèle ML de détection de voix déjà embarqué dans faster-whisper (aucune nouvelle dépendance).
+- Les segments se posent sur de **vraies fins d'énoncé** plutôt que sur les creux de volume : robuste au bruit de fond (l'ancien seuil ne coupait jamais quand l'ambiance dépassait `0.02`) et ne coupe plus au milieu d'un mot quand la voix baisse.
+- Le seuil de découpage est désormais une **probabilité de parole** (`STREAM_SPEECH_THRESHOLD`), indépendante du micro et de `AUDIO_GAIN` — fini le calibrage d'énergie à l'oreille. Hystérésis anti-flicker dérivée automatiquement.
+- Silero est pré-chargé au démarrage (avec Whisper) → pas de latence au premier push-to-talk.
+
+**Paramètres**
+
+- Nouveau : `STREAM_SPEECH_THRESHOLD = 0.5` — seuil de probabilité de parole (`0.3` = sensible, `0.7` = strict).
+- Supprimé : `STREAM_SILENCE_RMS` (remplacé par le VAD).
+
+**Correctif**
+
+- `start.bat` lance désormais le Python du venv directement (au lieu de `activate` + `python`) — corrige un `ModuleNotFoundError` quand plusieurs Python sont installés sur la machine.
 
 ### v1.4 — Streaming append-only de la dictée
 
