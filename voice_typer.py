@@ -643,6 +643,9 @@ class VoiceTyper:
 
         self.is_paused = False
 
+        # Session de collage (streaming) — presse-papier sauvé une fois, restauré à la fin
+        self._saved_clipboard = ""
+
         # Icônes pour le tray
         self.icon_idle = create_tray_icon((100, 100, 100))       # Gris
         self.icon_loading = create_tray_icon((200, 200, 50))     # Jaune (chargement)
@@ -895,58 +898,72 @@ class VoiceTyper:
 
     # ── Frappe du texte ──────────────────────────────────────
 
-    def _type_text(self, text: str):
-        """Colle le texte transcrit là où est le curseur via le presse-papiers.
-
-        Utilise exclusivement l'API Windows (win_ctrl_v / win_ctrl_shift_v)
-        au lieu de pynput — plus fiable sur les applis lancées en Administrateur.
-        """
-        if ADD_TRAILING_SPACE:
-            text = text + " "
-
-        # Lecture de l'ancien presse-papiers avec retry
-        old_clipboard = ""
+    def _read_clipboard(self):
+        """Lit le presse-papiers avec retry. Retourne "" en cas d'échec."""
         for _ in range(3):
             try:
-                old_clipboard = pyperclip.paste()
-                break
+                return pyperclip.paste()
             except Exception:
                 time.sleep(0.05)
+        return ""
 
-        try:
-            # Copie du texte avec retry
-            for attempt in range(3):
+    def _restore_clipboard(self, value):
+        """Restaure le presse-papiers en arrière-plan (laisse le collage se faire d'abord)."""
+        def restore():
+            time.sleep(0.1)   # Réduit de 0.5 → 0.1s : fenêtre de race condition minimisée
+            for _ in range(3):
                 try:
-                    pyperclip.copy(text)
+                    pyperclip.copy(value)
                     break
                 except Exception:
-                    if attempt == 2:
-                        log_err("✗ Impossible de copier dans le presse-papiers après 3 essais")
-                        return
                     time.sleep(0.05)
+        threading.Thread(target=restore, daemon=True).start()
 
-            time.sleep(PASTE_DELAY)
+    def _do_paste(self, text):
+        """Copie le texte dans le presse-papiers et déclenche le collage.
 
-            if is_terminal_focused():
-                # Dans un terminal, Ctrl+Shift+V est le raccourci standard de collage
-                win_ctrl_shift_v()
-            else:
-                win_ctrl_v()
+        Ne sauvegarde ni ne restaure le presse-papiers (géré par l'appelant).
+        API Windows (win_ctrl_v / win_ctrl_shift_v) — fiable sur les applis Admin.
+        """
+        for attempt in range(3):
+            try:
+                pyperclip.copy(text)
+                break
+            except Exception:
+                if attempt == 2:
+                    log_err("✗ Impossible de copier dans le presse-papiers après 3 essais")
+                    return
+                time.sleep(0.05)
 
-            time.sleep(PASTE_DELAY)
+        time.sleep(PASTE_DELAY)
+        if is_terminal_focused():
+            # Dans un terminal, Ctrl+Shift+V est le raccourci standard de collage
+            win_ctrl_shift_v()
+        else:
+            win_ctrl_v()
+        time.sleep(PASTE_DELAY)
 
-        except Exception as e:
-            log_err(f"✗ Erreur de frappe : {e}")
+    def _type_text(self, text: str):
+        """Mode bloc : sauve le presse-papiers, colle (remplace la sélection), restaure."""
+        if ADD_TRAILING_SPACE:
+            text = text + " "
+        old_clipboard = self._read_clipboard()
+        try:
+            self._do_paste(text)
         finally:
-            def restore():
-                time.sleep(0.1)   # Réduit de 0.5 → 0.1s : fenêtre de race condition minimisée
-                for _ in range(3):
-                    try:
-                        pyperclip.copy(old_clipboard)
-                        break
-                    except Exception:
-                        time.sleep(0.05)
-            threading.Thread(target=restore, daemon=True).start()
+            self._restore_clipboard(old_clipboard)
+
+    def _begin_paste_session(self):
+        """Streaming : sauve le presse-papiers une fois, avant le 1er segment."""
+        self._saved_clipboard = self._read_clipboard()
+
+    def _paste_segment(self, text):
+        """Streaming : colle un segment à la suite, sans toucher à la sauvegarde."""
+        self._do_paste(text)
+
+    def _end_paste_session(self):
+        """Streaming : restaure le presse-papiers sauvé au début de la session."""
+        self._restore_clipboard(self._saved_clipboard)
 
     # ── Listeners (souris / clavier) ─────────────────────────
 
