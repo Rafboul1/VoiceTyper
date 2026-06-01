@@ -811,8 +811,53 @@ class VoiceTyper:
 
     # ── Transcription ────────────────────────────────────────
 
+    def _transcribe_audio(self, audio, extra_prompt=""):
+        """Transcrit un bloc audio mono float32 → texte (gain, whisper, remplacements).
+
+        extra_prompt : contexte additionnel (derniers mots du segment précédent en
+        streaming) ajouté au vocab dans l'initial_prompt. "" en mode bloc.
+        Retourne le texte corrigé, ou "" si rien n'est détecté.
+        """
+        if AUDIO_GAIN != 1.0:
+            audio = np.clip(audio * AUDIO_GAIN, -1.0, 1.0)
+
+        duration = len(audio) / SAMPLE_RATE
+        log(f"→ Transcription de {duration:.1f}s d'audio...")
+        start_time = time.time()
+
+        initial_prompt = self.vocab.get_initial_prompt() + extra_prompt
+
+        # Transcription avec faster-whisper
+        segments, info = self.model.transcribe(
+            audio,
+            language=None,        # Auto-détection FR/EN
+            beam_size=2,          # 1-2 = latence /2 à /3, qualité quasi-identique sur voix claire
+            initial_prompt=initial_prompt if initial_prompt else None,
+            vad_filter=True,
+            vad_parameters=dict(
+                threshold=VAD_THRESHOLD,
+                min_silence_duration_ms=200,
+                speech_pad_ms=300,
+                min_speech_duration_ms=100,
+            ),
+        )
+
+        text = " ".join(seg.text for seg in segments).strip()
+        if text:
+            text = self.vocab.apply_replacements(text)
+
+        elapsed = time.time() - start_time
+        lang = info.language if info else "?"
+        prob = f"{info.language_probability:.0%}" if info else "?"
+        if text:
+            log(f"OK ({elapsed:.1f}s, {lang} {prob})")
+            log(f"→ \"{text}\"")
+        else:
+            log(f"(aucun texte détecté, {elapsed:.1f}s)")
+        return text
+
     def _process_audio(self):
-        """Transcrit l'audio enregistré et tape le texte."""
+        """Mode bloc (v1.3) : draine toute la queue, transcrit en une passe, colle."""
         try:
             # Drainer la queue — récupère tous les chunks sans bloquer
             chunks = []
@@ -832,59 +877,15 @@ class VoiceTyper:
                 audio = audio.mean(axis=1)
             else:
                 audio = audio.flatten()
-            duration = len(audio) / SAMPLE_RATE
 
+            duration = len(audio) / SAMPLE_RATE
             if duration < MIN_DURATION:
                 log(f"→ Audio trop court ({duration:.1f}s < {MIN_DURATION}s), ignoré")
                 return
 
-            # Amplifier le signal si voix basse
-            if AUDIO_GAIN != 1.0:
-                audio = audio * AUDIO_GAIN
-                audio = np.clip(audio, -1.0, 1.0)
-
-            log(f"→ Transcription de {duration:.1f}s d'audio...")
-            start_time = time.time()
-
-            # Construire le prompt initial avec le vocabulaire custom
-            initial_prompt = self.vocab.get_initial_prompt()
-
-            # Transcription avec faster-whisper
-            segments, info = self.model.transcribe(
-                audio,
-                language=None,        # Auto-détection FR/EN
-                beam_size=2,          # 1-2 = latence /2 à /3, qualité quasi-identique sur voix claire
-                initial_prompt=initial_prompt if initial_prompt else None,
-                vad_filter=True,
-                vad_parameters=dict(
-                    threshold=VAD_THRESHOLD,
-                    min_silence_duration_ms=200,
-                    speech_pad_ms=300,
-                    min_speech_duration_ms=100,
-                ),
-            )
-
-            # Assembler le texte
-            text_parts = []
-            for segment in segments:
-                text_parts.append(segment.text)
-
-            text = " ".join(text_parts).strip()
-
-            # Appliquer les remplacements de vocabulaire
+            text = self._transcribe_audio(audio)
             if text:
-                text = self.vocab.apply_replacements(text)
-
-            elapsed = time.time() - start_time
-            lang = info.language if info else "?"
-            prob = f"{info.language_probability:.0%}" if info else "?"
-
-            if text:
-                log(f"OK ({elapsed:.1f}s, {lang} {prob})")
-                log(f"→ \"{text}\"")
                 self._type_text(text)
-            else:
-                log(f"(aucun texte détecté, {elapsed:.1f}s)")
 
         except Exception as e:
             log_err(f"✗ Erreur transcription : {e}")
