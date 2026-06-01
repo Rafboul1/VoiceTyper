@@ -42,7 +42,7 @@ Dictée vocale locale Windows via faster-whisper (Whisper large-v3 GPU). Push-to
 
 ## État actuel
 
-v1.4 : **streaming append-only** livré sur la branche `feat/streaming-dictee` (pas encore mergé dans `master`) — le texte se pose au fil de l'eau (segments, frontière = silence RMS OU durée max 7 s) au lieu d'attendre le relâchement. Réversible via `STREAMING_MODE` ; mode bloc v1.3 conservé à l'identique. `STREAM_SILENCE_RMS` calibré à `0.02` à l'usage (plafond d'un détecteur à seuil fixe — pas perfectible au bouton). Détecteur de frontière testé (`test_segmentation.py`, 5 tests, lancé via le venv du repo principal) ; collage/threads/GPU validés manuellement (pauses, flot continu, terminal, A/B mode bloc).
+v1.4 : **streaming append-only** livré et mergé (`main` + `master` alignés, GitHub `Rafboul1/VoiceTyper`) — le texte se pose au fil de l'eau (segments, frontière = silence RMS OU durée max 7 s) au lieu d'attendre le relâchement. Réversible via `STREAMING_MODE` ; mode bloc v1.3 conservé à l'identique. `STREAM_SILENCE_RMS` calibré à `0.02` à l'usage (plafond d'un détecteur à seuil fixe — pas perfectible au bouton). Détecteur de frontière testé (`test_segmentation.py`, 5 tests, lancé via le venv du repo principal) ; collage/threads/GPU validés manuellement (pauses, flot continu, terminal, A/B mode bloc).
 
 ## Décisions
 
@@ -60,4 +60,4 @@ Worktree créé par `git worktree add` dans `~/.config/superpowers/worktrees/Voi
 - `BoundaryDetector` + tests, refactor `_transcribe_audio` / collage incrémental, `_stream_loop` + câblage start/stop, bump v1.4
 - Calibrage `STREAM_SILENCE_RMS = 0.02` validé à l'oreille
 **État** : terminé — validé manuellement (pauses OK, flot continu OK, ressenti bon)
-**Reprise** : merger `feat/streaming-dictee` → `master` puis push GitHub ; supprimer le plan livré
+**Reprise** : aucune action en attente — v1.4 en prod sur `main`.
