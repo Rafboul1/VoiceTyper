@@ -96,6 +96,15 @@ VAD_THRESHOLD = 0.5
 PASTE_DELAY = 0.05               # Délai avant de coller le texte (secondes)
 ADD_TRAILING_SPACE = True        # Ajouter un espace après le texte transcrit
 
+# --- Streaming append-only de la dictée ---
+# Si True, le texte se pose au fil de l'eau par segments pendant qu'on parle.
+# Si False, comportement v1.3 : transcription en une passe au relâchement.
+STREAMING_MODE = True
+STREAM_MAX_SEGMENT_SEC = 7        # Filet : coupe forcée d'un segment si aucun silence
+STREAM_SILENCE_MS = 600          # Durée de silence continu qui déclenche une frontière
+STREAM_SILENCE_RMS = 0.01        # Seuil d'énergie RMS sous lequel un bloc est du silence
+#                                  ⚠ à calibrer sur ton micro + AUDIO_GAIN (voir Task 6)
+
 # --- Exclusion de terminaux ---
 # Si TERMINAL_DETECTION = True, le PTT est ignoré quand un terminal est au premier plan.
 # ⚠️  Si tu veux DICTER dans le terminal → mets False.
