@@ -646,6 +646,11 @@ class VoiceTyper:
         # Session de collage (streaming) — presse-papier sauvé une fois, restauré à la fin
         self._saved_clipboard = ""
 
+        # État du streaming
+        self.detector = None        # BoundaryDetector, recréé à chaque start en streaming
+        self._stream_stop = False   # levé par stop_recording → le loop finit le reliquat
+        self._stream_active = False # un loop de streaming tourne (bloque un nouveau start)
+
         # Icônes pour le tray
         self.icon_idle = create_tray_icon((100, 100, 100))       # Gris
         self.icon_loading = create_tray_icon((200, 200, 50))     # Jaune (chargement)
@@ -776,7 +781,7 @@ class VoiceTyper:
 
     def start_recording(self):
         """Démarre la collecte audio (le stream reste ouvert)."""
-        if self.is_recording or self.is_processing or self.model is None:
+        if self.is_recording or self.model is None:
             return
 
         # Ne pas démarrer si en pause manuelle
@@ -787,26 +792,51 @@ class VoiceTyper:
         if TERMINAL_DETECTION and is_terminal_focused():
             return
 
+        if STREAMING_MODE:
+            if self._stream_active:
+                return  # un loop précédent finit encore son reliquat
+            self.is_recording = True
+            self._stream_active = True
+            self._stream_stop = False
+            with self.audio_queue.mutex:
+                self.audio_queue.queue.clear()
+            self.detector = BoundaryDetector(
+                SAMPLE_RATE, STREAM_SILENCE_RMS, STREAM_SILENCE_MS, STREAM_MAX_SEGMENT_SEC
+            )
+            self._begin_paste_session()
+            self.tray.icon = self.icon_recording
+            self.tray.title = "VoiceTyper — Enregistrement (streaming)..."
+            play_beep(SOUND_START_FREQ, SOUND_DURATION_MS)
+            threading.Thread(target=self._stream_loop, daemon=True).start()
+            return
+
+        # --- Mode bloc (v1.3) ---
+        if self.is_processing:
+            return
         self.is_recording = True
         # Vider la queue des résidus audio avant de commencer
         with self.audio_queue.mutex:
             self.audio_queue.queue.clear()
-
         # Feedback visuel + sonore
         self.tray.icon = self.icon_recording
         self.tray.title = "VoiceTyper — Enregistrement..."
         play_beep(SOUND_START_FREQ, SOUND_DURATION_MS)
 
     def stop_recording(self):
-        """Arrête la collecte audio et lance la transcription (stream reste ouvert)."""
+        """Arrête la collecte audio et déclenche la transcription (stream reste ouvert)."""
         if not self.is_recording:
             return
-
         self.is_recording = False
-
         play_beep(SOUND_STOP_FREQ, SOUND_DURATION_MS)
 
-        # Lancer la transcription dans un thread séparé
+        if STREAMING_MODE:
+            # Le loop transcrit le reliquat puis s'arrête de lui-même.
+            self.tray.icon = self.icon_processing
+            self.tray.title = "VoiceTyper — Transcription du reliquat..."
+            self._stream_stop = True
+            return
+
+        # --- Mode bloc (v1.3) ---
         self.is_processing = True
         self.tray.icon = self.icon_processing
         self.tray.title = "VoiceTyper — Transcription..."
@@ -895,6 +925,65 @@ class VoiceTyper:
         finally:
             self.is_processing = False
             self._set_idle()
+
+    def _stream_loop(self):
+        """Streaming : draine l'audio en continu, coupe en segments, transcrit + colle au fil de l'eau."""
+        segment_chunks = []
+        context = ""
+        try:
+            while True:
+                try:
+                    chunk = self.audio_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if self._stream_stop:
+                        break  # plus rien à lire ET stop demandé → on finit
+                    continue
+
+                # Convertir en mono si stéréo
+                if chunk.ndim > 1 and chunk.shape[1] > 1:
+                    mono = chunk.mean(axis=1)
+                else:
+                    mono = chunk.flatten()
+
+                segment_chunks.append(mono)
+                if self.detector.feed(mono):
+                    context = self._flush_segment(segment_chunks, context)
+                    segment_chunks = []
+                    self.detector.reset()
+
+            # Reliquat final (ce qui restait après le dernier silence / au relâchement)
+            if segment_chunks:
+                self._flush_segment(segment_chunks, context)
+
+        except Exception as e:
+            log_err(f"✗ Erreur streaming : {e}")
+        finally:
+            self._end_paste_session()
+            self._stream_active = False
+            self.is_processing = False
+            self._set_idle()
+
+    def _flush_segment(self, chunks, context):
+        """Transcrit un segment et le colle en append.
+
+        Retourne le nouveau contexte (derniers mots) pour l'initial_prompt du segment
+        suivant. Un échec de transcription est loggé et n'interrompt pas le streaming.
+        """
+        if not chunks:
+            return context
+        audio = np.concatenate(chunks, axis=0)
+        if len(audio) / SAMPLE_RATE < MIN_DURATION:
+            return context
+        try:
+            text = self._transcribe_audio(audio, extra_prompt=context)
+        except Exception as e:
+            log_err(f"✗ Erreur transcription segment : {e}")
+            return context
+        if not text:
+            return context
+        self._paste_segment((text + " ") if ADD_TRAILING_SPACE else text)
+        # Contexte = derniers ~24 mots cumulés, pour la continuité du prompt suivant
+        return " ".join((context + " " + text).split()[-24:])
 
     # ── Frappe du texte ──────────────────────────────────────
 
