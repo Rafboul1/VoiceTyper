@@ -1,0 +1,2 @@
+# Dépendances de développement uniquement (non requises pour faire tourner VoiceTyper).
+pytest
