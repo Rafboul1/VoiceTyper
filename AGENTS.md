@@ -42,25 +42,8 @@ Dictée vocale locale Windows via faster-whisper (Whisper large-v3 GPU). Push-to
 
 **Workflow release** : modifier `voice_typer.py` → tester (terminal + app + admin) → mettre à jour Changelog dans `README.md` → commit + push GitHub
 
-## État actuel
+## Continuité
 
-v1.5 : **découpage par Silero VAD** livré et en prod (`main` + `master` alignés, GitHub `Rafboul1/VoiceTyper`, commit `9974f42`). Le streaming append-only pose le texte au fil de l'eau ; la frontière de segment est décidée par le VAD Silero (modèle ML embarqué dans faster-whisper, fenêtre glissante + hystérésis) au lieu de l'ancien seuil d'énergie RMS — segments sur de vraies fins d'énoncé, robustes au bruit, indépendants du micro/`AUDIO_GAIN`. Seuil = `STREAM_SPEECH_THRESHOLD = 0.5` (probabilité de parole) ; filet durée max 7 s conservé. Réversible via `STREAMING_MODE` ; mode bloc v1.3 conservé. Tests : `test_segmentation.py` (8 tests, modèle injectable, lancés via le venv du repo) ; validé au micro (pauses plus nettes et plus rapides).
-
-## Décisions
-
-### 2026-06-01 — Silero VAD pour la détection de frontière (remplace le seuil RMS)
-Le découpage de segments écoute la *parole* (proba Silero) au lieu du *volume* (RMS). Frontières sur de vraies fins d'énoncé, robustes au bruit de fond, seuil indépendant du micro/`AUDIO_GAIN`. Modèle déjà embarqué dans faster-whisper → zéro nouvelle dépendance. Rejeté : (a) garder le seuil RMS (`STREAM_SILENCE_RMS` — plafond non perfectible au bouton, ne coupe jamais si l'ambiance > seuil) ; (b) LLM de nettoyage type Wispr (ajoute latence + charge GPU + dépendance, hors-sujet pour du 100 % local) ; (c) re-décodage live mot-à-mot (backspaces fragiles via presse-papier — déjà rejeté) ; (d) VAD streaming stateful via `session.run` (couple à l'interne non-public de faster-whisper pour un gain CPU négligeable).
-
-### 2026-05-31 — Streaming append-only, sans auto-correction
-Le texte se pose par segments au fil de l'eau, jamais réécrit. Tue la latence perçue sur les gros textes. Rejeté : auto-correction rétroactive type Apple (fenêtre glissante / LocalAgreement) → re-décodage en boucle + charge GPU + backspaces fragiles (frappe par presse-papier), pour un confort déjà acquis à ~80 % en mode bloc.
-
-## Dernière session
-
-**Date** : 2026-06-01
-**Fait** :
-- Remplacé la détection de frontière RMS par Silero VAD (`SileroClassifier` injectable, fenêtre glissante 1 s + hystérésis ; `BoundaryDetector` refactoré, logique de comptage inchangée)
-- Code-review (high) : 2 correctifs (frontière manquée sur reprise dans le même bloc ; race `lru_cache` au warm-up) + test d'hystérésis renforcé ; 1 faux-fix efficiency écarté
-- Fix `start.bat` : appel direct du python du venv (corrige `ModuleNotFoundError` multi-Python)
-- Bump v1.5, changelog + table params README, 8 tests verts
-**État** : fini — v1.5 en prod sur `main` + `master` (commit `9974f42`), validé au micro
-**Reprise** : rien en cours. Réglage éventuel à l'usage : `STREAM_SPEECH_THRESHOLD` (0.5).
+- À chaque reprise, lire `STATUS.md` avant d'agir.
+- Consulter `JOURNAL.md` uniquement pour retracer une décision ou une ancienne session.
+- Garder ici seulement les règles durables ; l'état courant et l'historique n'appartiennent pas à ce fichier.
